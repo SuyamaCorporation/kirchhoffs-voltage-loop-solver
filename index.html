@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kirchhoff's Voltage Law Loop Solver</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-6">
+<div class="max-w-5xl mx-auto">
+  <h1 class="text-2xl font-bold text-cyan-400 mb-2">Kirchhoff's Voltage Law Loop Solver</h1>
+  <p class="text-gray-400 mb-6 text-sm">Define up to 4 loops with EMF sources and resistors. Solves for loop currents using Cramer's rule.</p>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Left: Loop editor -->
+    <div>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-base font-semibold text-gray-200">Loop Definitions</h2>
+        <div class="flex gap-2">
+          <button id="addLoopBtn" class="text-xs bg-cyan-700 hover:bg-cyan-600 px-3 py-1 rounded-lg">+ Add Loop</button>
+          <button id="solveBtn" class="text-xs bg-green-700 hover:bg-green-600 px-3 py-1 rounded-lg font-semibold">Solve</button>
+        </div>
+      </div>
+      <div id="loopContainer" class="space-y-4"></div>
+      <div class="mt-4 bg-gray-900 rounded-xl p-3 border border-gray-800">
+        <p class="text-xs text-gray-400 mb-1">Shared resistors (mutual coupling between loops)</p>
+        <div id="mutualContainer" class="space-y-2"></div>
+        <button id="addMutualBtn" class="mt-2 text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded-lg">+ Add Shared Resistor</button>
+      </div>
+    </div>
+
+    <!-- Right: Circuit SVG + Results -->
+    <div>
+      <div class="bg-gray-900 rounded-xl p-4 border border-gray-800 mb-4">
+        <h2 class="text-base font-semibold text-gray-200 mb-2">Circuit Diagram</h2>
+        <svg id="circuitSvg" width="100%" height="220" viewBox="0 0 400 220" class="rounded-lg bg-gray-950"></svg>
+      </div>
+
+      <div id="resultsSection" class="bg-gray-900 rounded-xl p-4 border border-gray-800">
+        <h2 class="text-base font-semibold text-gray-200 mb-3">Solution</h2>
+        <div id="equationsDiv" class="text-xs text-gray-400 font-mono mb-3"></div>
+        <div id="resultsDiv" class="space-y-2"></div>
+        <div id="powerDiv" class="mt-3 pt-3 border-t border-gray-700"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const LOOP_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399'];
+
+let loops = [
+  { emf: 12, r1: 2, r2: 4, label: 'Loop 1' },
+  { emf: 6,  r1: 3, r2: 4, label: 'Loop 2' },
+];
+let mutuals = []; // {loop1: 0, loop2: 1, r: 4}
+
+function renderLoops() {
+  const container = document.getElementById('loopContainer');
+  container.innerHTML = '';
+  loops.forEach((loop, idx) => {
+    const div = document.createElement('div');
+    div.className = 'bg-gray-900 rounded-xl p-4 border border-gray-800';
+    div.innerHTML = `
+      <div class="flex items-center justify-between mb-2">
+        <span class="font-semibold text-sm" style="color:${LOOP_COLORS[idx]}">${loop.label}</span>
+        ${loops.length > 1 ? `<button data-idx="${idx}" class="remove-loop text-xs text-red-400 hover:text-red-300">Remove</button>` : ''}
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="text-xs text-gray-400">EMF (V)</label>
+          <input type="number" step="0.1" value="${loop.emf}" data-idx="${idx}" data-field="emf"
+            class="loop-input w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-cyan-500">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">R1 (Ω) own</label>
+          <input type="number" step="0.1" min="0.01" value="${loop.r1}" data-idx="${idx}" data-field="r1"
+            class="loop-input w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-cyan-500">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">R2 (Ω) own</label>
+          <input type="number" step="0.1" min="0" value="${loop.r2}" data-idx="${idx}" data-field="r2"
+            class="loop-input w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-cyan-500">
+        </div>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+
+  document.querySelectorAll('.loop-input').forEach(el => {
+    el.addEventListener('input', () => {
+      const idx = parseInt(el.dataset.idx);
+      const field = el.dataset.field;
+      loops[idx][field] = parseFloat(el.value) || 0;
+    });
+  });
+  document.querySelectorAll('.remove-loop').forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.idx);
+      loops.splice(idx, 1);
+      mutuals = mutuals.filter(m => m.loop1 !== idx && m.loop2 !== idx)
+        .map(m => ({
+          ...m,
+          loop1: m.loop1 > idx ? m.loop1 - 1 : m.loop1,
+          loop2: m.loop2 > idx ? m.loop2 - 1 : m.loop2,
+        }));
+      loops.forEach((l, i) => l.label = `Loop ${i+1}`);
+      renderLoops(); renderMutuals(); drawCircuit();
+    });
+  });
+  drawCircuit();
+}
+
+function renderMutuals() {
+  const container = document.getElementById('mutualContainer');
+  container.innerHTML = '';
+  if (loops.length < 2) { container.innerHTML = '<p class="text-xs text-gray-600">Need at least 2 loops for shared resistors.</p>'; return; }
+  mutuals.forEach((m, idx) => {
+    const div = document.createElement('div');
+    div.className = 'flex items-center gap-2 text-sm';
+    div.innerHTML = `
+      <select data-idx="${idx}" data-field="loop1" class="mutual-sel bg-gray-800 border border-gray-700 rounded px-1 py-1 text-xs focus:outline-none">
+        ${loops.map((l,i) => `<option value="${i}" ${m.loop1===i?'selected':''}>${l.label}</option>`).join('')}
+      </select>
+      <span class="text-gray-500 text-xs">↔</span>
+      <select data-idx="${idx}" data-field="loop2" class="mutual-sel bg-gray-800 border border-gray-700 rounded px-1 py-1 text-xs focus:outline-none">
+        ${loops.map((l,i) => `<option value="${i}" ${m.loop2===i?'selected':''}>${l.label}</option>`).join('')}
+      </select>
+      <input type="number" step="0.1" min="0.1" value="${m.r}" data-idx="${idx}" data-field="r"
+        class="mutual-input w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none">
+      <span class="text-xs text-gray-500">Ω</span>
+      <button data-idx="${idx}" class="remove-mutual text-xs text-red-400 hover:text-red-300 ml-1">×</button>
+    `;
+    container.appendChild(div);
+  });
+  document.querySelectorAll('.mutual-sel,.mutual-input').forEach(el => {
+    el.addEventListener('change', () => {
+      const idx = parseInt(el.dataset.idx);
+      mutuals[idx][el.dataset.field] = parseFloat(el.value) || 0;
+    });
+  });
+  document.querySelectorAll('.remove-mutual').forEach(el => {
+    el.addEventListener('click', () => { mutuals.splice(parseInt(el.dataset.idx), 1); renderMutuals(); });
+  });
+}
+
+// Build KVL matrix and solve
+function solve() {
+  const n = loops.length;
+  // Build resistance matrix R[i][j] and voltage vector V[i]
+  const R = Array.from({length: n}, () => Array(n).fill(0));
+  const V = loops.map(l => l.emf);
+
+  loops.forEach((l, i) => {
+    R[i][i] += l.r1 + l.r2;
+  });
+
+  // Mutual (shared) resistors
+  mutuals.forEach(m => {
+    const i = m.loop1, j = m.loop2;
+    if (i < 0 || i >= n || j < 0 || j >= n || i === j) return;
+    R[i][i] += m.r;
+    R[j][j] += m.r;
+    R[i][j] -= m.r;
+    R[j][i] -= m.r;
+  });
+
+  // Cramer's rule
+  const detR = det(R);
+  if (Math.abs(detR) < 1e-12) return null;
+
+  const currents = [];
+  for (let k = 0; k < n; k++) {
+    const Rk = R.map((row, i) => row.map((val, j) => j === k ? V[i] : val));
+    currents.push(det(Rk) / detR);
+  }
+
+  return { currents, R, V };
+}
+
+function det(M) {
+  const n = M.length;
+  if (n === 1) return M[0][0];
+  if (n === 2) return M[0][0]*M[1][1] - M[0][1]*M[1][0];
+  let d = 0;
+  for (let j = 0; j < n; j++) {
+    const minor = M.slice(1).map(row => row.filter((_, jj) => jj !== j));
+    d += (j % 2 === 0 ? 1 : -1) * M[0][j] * det(minor);
+  }
+  return d;
+}
+
+function displayResults() {
+  const result = solve();
+  const eqDiv = document.getElementById('equationsDiv');
+  const resDiv = document.getElementById('resultsDiv');
+  const pwrDiv = document.getElementById('powerDiv');
+
+  if (!result) {
+    resDiv.innerHTML = '<p class="text-red-400 text-sm">Singular matrix — check if loops are properly defined.</p>';
+    return;
+  }
+  const { currents, R, V } = result;
+  const n = loops.length;
+
+  // Show KVL equations
+  let eq = '<div class="text-xs text-gray-400 mb-2">KVL Equations:</div>';
+  for (let i = 0; i < n; i++) {
+    let line = loops[i].emf.toFixed(1) + 'V = ';
+    const terms = R[i].map((r, j) => {
+      if (Math.abs(r) < 1e-9) return null;
+      return `${r.toFixed(2)}·I${j+1}`;
+    }).filter(Boolean);
+    line += terms.join(' + ');
+    eq += `<div>Loop ${i+1}: ${line}</div>`;
+  }
+  eqDiv.innerHTML = eq;
+
+  // Current results
+  resDiv.innerHTML = '';
+  currents.forEach((I, i) => {
+    const dir = I >= 0 ? 'CW' : 'CCW';
+    const div = document.createElement('div');
+    div.className = 'flex items-center justify-between bg-gray-800 rounded-lg px-3 py-2';
+    div.innerHTML = `
+      <span class="font-medium" style="color:${LOOP_COLORS[i]}">I${i+1} (${loops[i].label})</span>
+      <span class="font-mono text-lg font-bold text-white">${I.toFixed(4)} A</span>
+      <span class="text-xs text-gray-400">${dir}</span>
+    `;
+    resDiv.appendChild(div);
+  });
+
+  // Power dissipation per resistor
+  let pwrHtml = '<div class="text-xs text-gray-400 mb-2">Power Dissipation:</div>';
+  let totalPower = 0;
+  loops.forEach((l, i) => {
+    const I = currents[i];
+    const p1 = l.r1 * I * I;
+    const p2 = l.r2 * I * I;
+    totalPower += p1 + p2;
+    pwrHtml += `<div class="text-xs font-mono"><span style="color:${LOOP_COLORS[i]}">L${i+1} R1=${l.r1}Ω:</span> ${p1.toFixed(4)} W &nbsp; <span style="color:${LOOP_COLORS[i]}">R2=${l.r2}Ω:</span> ${p2.toFixed(4)} W</div>`;
+  });
+  mutuals.forEach((m, idx) => {
+    if (m.loop1 >= n || m.loop2 >= n) return;
+    const Idiff = currents[m.loop1] - currents[m.loop2];
+    const p = m.r * Idiff * Idiff;
+    totalPower += p;
+    pwrHtml += `<div class="text-xs font-mono text-gray-300">Shared R${idx+1}=${m.r}Ω (L${m.loop1+1}↔L${m.loop2+1}): ${p.toFixed(4)} W</div>`;
+  });
+  pwrHtml += `<div class="mt-2 text-sm font-semibold text-yellow-400">Total: ${totalPower.toFixed(4)} W</div>`;
+  pwrDiv.innerHTML = pwrHtml;
+
+  drawCircuit(currents);
+}
+
+function drawCircuit(currents) {
+  const svg = document.getElementById('circuitSvg');
+  const n = loops.length;
+  svg.innerHTML = '';
+
+  const ns = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs, text='') {
+    const e = document.createElementNS(ns, tag);
+    Object.entries(attrs).forEach(([k,v]) => e.setAttribute(k,v));
+    if (text) e.textContent = text;
+    return e;
+  }
+
+  // Draw simple loop diagrams side by side
+  const W = 400, H = 220;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  const loopW = Math.min(160, (W - 20) / n);
+  const loopH = 160;
+  const startX = (W - loopW * n - 10 * (n-1)) / 2;
+  const startY = 30;
+
+  loops.forEach((l, idx) => {
+    const x = startX + idx * (loopW + 10);
+    const y = startY;
+    const color = LOOP_COLORS[idx];
+    const I = currents ? currents[idx] : 0;
+
+    // Rectangle for loop
+    svg.appendChild(el('rect', { x, y, width: loopW, height: loopH, fill: 'none', stroke: color, 'stroke-width': '2', rx: '4' }));
+
+    // EMF symbol (battery) on top
+    const midX = x + loopW/2;
+    svg.appendChild(el('line', { x1: midX-15, y1: y, x2: midX-5, y2: y, stroke: color, 'stroke-width': '2' }));
+    svg.appendChild(el('line', { x1: midX-5, y1: y-8, x2: midX-5, y2: y+8, stroke: color, 'stroke-width': '3' }));
+    svg.appendChild(el('line', { x1: midX+5, y1: y-5, x2: midX+5, y2: y+5, stroke: color, 'stroke-width': '1.5' }));
+    svg.appendChild(el('line', { x1: midX+5, y1: y, x2: midX+20, y2: y, stroke: color, 'stroke-width': '2' }));
+    svg.appendChild(el('text', { x: midX, y: y-13, fill: color, 'font-size': '10', 'text-anchor': 'middle' }, `${l.emf}V`));
+
+    // R1 on left side
+    const ry1 = y + loopH * 0.25, ry2 = y + loopH * 0.55;
+    const rx1 = x;
+    for (let i = 0; i < 5; i++) {
+      const yy = ry1 + (ry2-ry1) * i / 5;
+      const yyn = ry1 + (ry2-ry1) * (i+1) / 5;
+      svg.appendChild(el('line', { x1: rx1, y1: yy, x2: rx1 + (i%2===0 ? -6 : 6), y2: (yy+yyn)/2, stroke: color, 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: rx1 + (i%2===0 ? -6 : 6), y1: (yy+yyn)/2, x2: rx1, y2: yyn, stroke: color, 'stroke-width': '1.5' }));
+    }
+    svg.appendChild(el('text', { x: x-22, y: (ry1+ry2)/2+4, fill: '#9ca3af', 'font-size': '9', 'text-anchor': 'middle' }, `${l.r1}Ω`));
+
+    // R2 on right side
+    const rx2 = x + loopW;
+    for (let i = 0; i < 5; i++) {
+      const yy = ry1 + (ry2-ry1) * i / 5;
+      const yyn = ry1 + (ry2-ry1) * (i+1) / 5;
+      svg.appendChild(el('line', { x1: rx2, y1: yy, x2: rx2 + (i%2===0 ? 6 : -6), y2: (yy+yyn)/2, stroke: color, 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: rx2 + (i%2===0 ? 6 : -6), y1: (yy+yyn)/2, x2: rx2, y2: yyn, stroke: color, 'stroke-width': '1.5' }));
+    }
+    svg.appendChild(el('text', { x: x+loopW+22, y: (ry1+ry2)/2+4, fill: '#9ca3af', 'font-size': '9', 'text-anchor': 'middle' }, `${l.r2}Ω`));
+
+    // Current arrow in middle
+    if (currents) {
+      const dir = I >= 0 ? '→' : '←';
+      svg.appendChild(el('text', { x: midX, y: y+loopH/2+4, fill: color, 'font-size': '13', 'text-anchor': 'middle', 'font-weight': 'bold' }, dir));
+      svg.appendChild(el('text', { x: midX, y: y+loopH/2+18, fill: color, 'font-size': '9', 'text-anchor': 'middle' }, `${Math.abs(I).toFixed(3)}A`));
+    }
+
+    // Loop label
+    svg.appendChild(el('text', { x: midX, y: y+loopH+14, fill: color, 'font-size': '10', 'text-anchor': 'middle' }, `I${idx+1}=${loops[idx].label}`));
+  });
+
+  // Mark shared resistors
+  mutuals.forEach((m, idx) => {
+    if (m.loop1 >= n || m.loop2 >= n) return;
+    const x1 = startX + Math.min(m.loop1, m.loop2) * (loopW + 10) + loopW;
+    const x2 = startX + Math.max(m.loop1, m.loop2) * (loopW + 10);
+    const midX2 = (x1 + x2) / 2;
+    const midY2 = startY + loopH * 0.4;
+    svg.appendChild(el('text', { x: midX2, y: midY2, fill: '#6b7280', 'font-size': '9', 'text-anchor': 'middle' }, `R=${m.r}Ω shared`));
+    svg.appendChild(el('line', { x1: x1, y1: midY2-2, x2: x2, y2: midY2-2, stroke: '#6b7280', 'stroke-width': '1', 'stroke-dasharray': '3,3' }));
+  });
+}
+
+document.getElementById('addLoopBtn').addEventListener('click', () => {
+  if (loops.length >= 4) return;
+  loops.push({ emf: 9, r1: 2, r2: 3, label: `Loop ${loops.length+1}` });
+  renderLoops(); renderMutuals();
+});
+document.getElementById('addMutualBtn').addEventListener('click', () => {
+  if (loops.length < 2) return;
+  mutuals.push({ loop1: 0, loop2: 1, r: 2 });
+  renderMutuals();
+});
+document.getElementById('solveBtn').addEventListener('click', displayResults);
+
+renderLoops();
+renderMutuals();
+drawCircuit();
+</script>
+</body>
+</html>
